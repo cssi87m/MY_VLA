@@ -132,7 +132,14 @@ class GrootN15Adapter:
         )
 
         hidden = backbone_outputs["backbone_features"]
-        hidden = hidden.detach().float().cpu().numpy() if hasattr(hidden, "detach") else np.asarray(hidden)
+        if hasattr(hidden, "detach"):
+            # The residual heads pool all token/time dimensions. Pool before
+            # leaving CUDA so training transfers one vector, not every token.
+            if hidden.ndim > 2:
+                hidden = hidden.mean(dim=tuple(range(1, hidden.ndim - 1)))
+            hidden = hidden.detach().float().cpu().numpy()
+        else:
+            hidden = np.asarray(hidden)
         if hasattr(action_tensor, "detach"):
             action_tensor = action_tensor.detach().cpu().numpy()
         action_tensor = np.asarray(action_tensor)

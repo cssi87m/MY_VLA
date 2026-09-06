@@ -23,7 +23,7 @@ from src.my_vla.retrieval.bank import checkpoint_retrieval_key
 from src.my_vla.retrieval.bank import tail_candidate_features
 from src.my_vla.training.pretrain import PretrainConfig
 from src.my_vla.training.pretrain import initialize_pretraining
-from src.my_vla.training.pretrain import pretrain_step
+from src.my_vla.training.pretrain import make_pretrain_step
 
 
 @dataclass(frozen=True)
@@ -43,6 +43,7 @@ class TrainConfig:
     max_samples: int = 256
     epochs: int = 1
     batch_size: int = 16
+    log_every: int = 20
     seed: int = 0
 
 
@@ -66,6 +67,7 @@ def _parse_args(argv: list[str] | None = None) -> TrainConfig:
     parser.add_argument("--max-samples", type=int, default=256)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--log-every", type=int, default=20)
     parser.add_argument("--seed", type=int, default=0)
     return TrainConfig(**vars(parser.parse_args(argv)))
 
@@ -101,7 +103,7 @@ class LiberoSampleCollector:
         self.config = config
         self.adapter = adapter
 
-    def collect_features(self) -> list[dict]:
+    def collect_features(self, bank: RetrievalBank | None = None) -> list[dict]:
         args = self.config
         adapter = self.adapter
         samples = []
@@ -116,15 +118,25 @@ class LiberoSampleCollector:
             pooled_hidden = hidden.mean(axis=tuple(range(hidden.ndim - 1))) if hidden.ndim > 1 else hidden
             checkpoint_state = np.asarray(sample["state_chunk"][args.replan_steps], dtype=np.float32)
             base_tail = base_chunk[args.replan_steps :]
-            samples.append(
-                {
-                    **sample,
-                    "hidden": pooled_hidden,
-                    "base_action_prefix": base_chunk[: args.replan_steps],
-                    "base_action_tail": base_tail,
-                    "checkpoint_state": checkpoint_state,
-                }
-            )
+            record = {
+                # Do not retain observations or episode-sized trajectories after
+                # GR00T has produced their training features.
+                "hidden": pooled_hidden,
+                "state": np.asarray(sample["state"], dtype=np.float32),
+                "instruction": sample["instruction"],
+                "episode_id": sample.get("episode_id", ""),
+                "expert_action_chunk": np.asarray(sample["expert_action_chunk"], dtype=np.float32),
+                "base_action_prefix": base_chunk[: args.replan_steps],
+                "base_action_tail": base_tail,
+                "checkpoint_state": checkpoint_state,
+            }
+            if bank is not None:
+                key = checkpoint_retrieval_key(checkpoint_state, record["instruction"])
+                result = bank.retrieve_tails(
+                    key, retrieval_k=args.retrieval_k, exclude_episode_id=record["episode_id"]
+                )
+                record["retrieval_context"] = tail_candidate_features(result)
+            samples.append(record)
             if args.max_samples > 0 and len(samples) >= args.max_samples:
                 break
         if not samples:
@@ -151,13 +163,15 @@ class ResidualLiberoTrainer:
             raise ValueError("batch_size must be positive")
         if config.retrieval_k < 1:
             raise ValueError("retrieval_k must be positive")
+        if config.log_every < 1:
+            raise ValueError("log_every must be positive")
         self.config = config
 
     def run(self) -> None:
         bank = self._load_memory_bank()
         adapter = _make_adapter(self.config)
         try:
-            samples = LiberoSampleCollector(self.config, adapter).collect_features()
+            samples = LiberoSampleCollector(self.config, adapter).collect_features(bank=bank)
         finally:
             # Release GROOT before JAX allocates memory for training.
             del adapter
@@ -199,36 +213,53 @@ class ResidualLiberoTrainer:
             retrieval_k=args.retrieval_k,
         )
         bundle, params, opt_state = initialize_pretraining(jax.random.key(args.seed), config)
+        step = make_pretrain_step(bundle)
+        step_index = 0
         for _ in range(args.epochs):
             for start in range(0, len(samples), args.batch_size):
                 batch_samples = samples[start : start + args.batch_size]
                 batch = self._make_batch(batch_samples, bank)
-                params, opt_state, metrics = pretrain_step(bundle, params, opt_state, batch)
-                print({key: float(value) for key, value in metrics.items()})
+                params, opt_state, metrics = step(params, opt_state, batch)
+                step_index += 1
+                # Converting a JAX scalar to float synchronizes the device; do
+                # it periodically rather than on every accelerator update.
+                if step_index % args.log_every == 0:
+                    print({key: float(value) for key, value in metrics.items()})
 
         return config, params
 
     def _make_batch(self, batch_samples: list[dict], bank: RetrievalBank) -> dict:
         args = self.config
+        padded = len(batch_samples) < args.batch_size
+        valid_count = len(batch_samples)
+        if padded:
+            batch_samples = batch_samples + [batch_samples[-1]] * (args.batch_size - valid_count)
         retrieval_context = []
         for sample in batch_samples:
             key = checkpoint_retrieval_key(sample["checkpoint_state"], sample["instruction"])
-            result = bank.retrieve_tails(
-                key,
-                retrieval_k=args.retrieval_k,
-                exclude_episode_id=sample.get("episode_id"),
-            )
-            retrieval_context.append(tail_candidate_features(result))
+            context = sample.get("retrieval_context")
+            if context is None:
+                result = bank.retrieve_tails(
+                    key,
+                    retrieval_k=args.retrieval_k,
+                    exclude_episode_id=sample.get("episode_id"),
+                )
+                context = tail_candidate_features(result)
+            retrieval_context.append(context)
         return {
             "hidden": jnp.asarray(np.stack([x["hidden"] for x in batch_samples])),
             "state": jnp.asarray(np.stack([x["state"] for x in batch_samples])),
             "base_action_prefix": jnp.asarray(np.stack([x["base_action_prefix"] for x in batch_samples])),
             "base_action_tail": jnp.asarray(np.stack([x["base_action_tail"] for x in batch_samples])),
             "future_state": jnp.asarray(np.stack([x["checkpoint_state"] for x in batch_samples])),
-            "residual_target": jnp.asarray(
-                np.stack([x["expert_action_chunk"][args.replan_steps :] - x["base_action_tail"] for x in batch_samples])
-            ),
+            "residual_target": jnp.asarray(np.stack([
+                x.get("residual_target", x["expert_action_chunk"][args.replan_steps :] - x["base_action_tail"])
+                for x in batch_samples
+            ])),
             "retrieval_context": jnp.asarray(np.stack(retrieval_context)),
+            "sample_weight": jnp.asarray(
+                np.concatenate([np.ones(valid_count, dtype=np.float32), np.zeros(len(batch_samples) - valid_count, dtype=np.float32)])
+            ),
         }
 
     def save_checkpoint(self, config: PretrainConfig, params: dict) -> None:

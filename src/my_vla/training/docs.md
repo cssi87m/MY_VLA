@@ -20,10 +20,11 @@ parameter tree, and Optax optimizer state. It validates that
 `2 * state_dim + 4` (18 for the canonical seven-dimensional state).
 
 `pretrain_step(bundle, params, opt_state, batch)` performs one JAX/Optax
-update. Its combined loss has two parts:
+update. `make_pretrain_step(bundle)` returns its JIT-compiled form for the
+fixed-size script training loop. Its combined loss has two parts:
 
-1. Future-state loss: both `FutureStateHead` and the action-conditioned
-   transition model regress to `batch["future_state"]`.
+1. Future-state loss: the action-conditioned transition model regresses to
+   `batch["future_state"]`.
 2. Residual behavior-cloning loss: the actor predicts
    `expert_action_chunk[replan_steps:] - base_action_tail` from projected VLM
    features, the base tail, checkpoint consistency, and retrieval context.
@@ -40,9 +41,12 @@ the replan checkpoint, rather than against another predicted state.
 | `base_action_prefix` | `(B, replan_steps, action_dim)`. |
 | `base_action_tail`, `residual_target` | `(B, correction_horizon, action_dim)`. |
 | `retrieval_context` | `(B, retrieval_context_dim)`, containing padded retrieved expert tails, scores, returns, and a mask. |
+| `sample_weight` | `(B,)`; masks duplicate padding used to keep the last batch at a fixed compiled shape. |
 
 The training script loads an immutable expert memory bank, collects frozen
-GROOT features, releases GROOT GPU memory, then trains the JAX heads. The
+GROOT features and retrieval contexts, releases GROOT GPU memory, then trains
+the JAX heads. Raw images and episode trajectories are not retained after
+feature extraction. The
 memory bank is passed separately to the rollout policy and must use the same
 horizon and replan-step values as the checkpoint.
 

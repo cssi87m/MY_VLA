@@ -38,7 +38,8 @@ def load_script(monkeypatch):
     stub('src.my_vla.models.future_state', ActionConditionedTransition=Mock(), future_consistency=Mock())
     stub('src.my_vla.models.projector', LatentProjector=Mock())
     stub('src.my_vla.rl.residual_ac', ResidualActor=Mock(), build_actor_input=Mock(), clip_libero_action=Mock())
-    stub('src.my_vla.training.pretrain', PretrainConfig=Mock(), initialize_pretraining=Mock(), pretrain_step=Mock())
+    stub('src.my_vla.training.pretrain', PretrainConfig=Mock(), initialize_pretraining=Mock(),
+         pretrain_step=Mock(), make_pretrain_step=Mock())
     stub('src.my_vla.models.residual_libero_rollout', ResidualLiberoRolloutPolicy=Mock())
     stub('openpi.serving', websocket_policy_server=SimpleNamespace(WebsocketPolicyServer=Mock()))
     stub('imageio', mimwrite=Mock())
@@ -69,7 +70,7 @@ def test_training_features_and_batch_preserve_checkpoint_tail(load_script, monke
     }
     monkeypatch.setattr(module, 'iter_libero_transitions', lambda config: iter([sample, sample]))
     adapter = Mock(return_value=SimpleNamespace(base_action=np.zeros((2, 7)), hidden=np.ones((2, 3))))
-    config = module.TrainConfig('model', horizon=4, replan_steps=2, retrieval_k=2, max_samples=1)
+    config = module.TrainConfig('model', horizon=4, replan_steps=2, retrieval_k=2, max_samples=1, batch_size=1)
     samples = module.LiberoSampleCollector(config, adapter).collect_features()
     assert len(samples) == 1
     np.testing.assert_array_equal(samples[0]['checkpoint_state'], sample['state_chunk'][2])
@@ -103,6 +104,24 @@ def test_checkpoint_retrieval_excludes_episode_and_pads(load_script):
     np.testing.assert_array_equal(result.mask, [1.0, 0.0, 0.0])
     np.testing.assert_array_equal(result.expert_actions[0], np.full(14, 2.0))
     np.testing.assert_array_equal(result.expert_actions[1:], np.zeros((2, 14)))
+
+
+def test_memory_bank_numeric_columns_round_trip(load_script, tmp_path):
+    load_script('scripts/train_residual_libero.py')
+    bank_module = sys.modules['src.my_vla.retrieval.bank']
+    key = bank_module.checkpoint_retrieval_key(np.zeros(7), 'move')
+    record = bank_module.RetrievalRecord(
+        key, np.zeros(7), 'move', np.zeros(14), np.ones(14), np.ones(14), np.zeros(7), 2.0, 'demo:0'
+    )
+    path = tmp_path / 'bank'
+    bank_module.RetrievalBank(records=[record]).save(path)
+    with np.load(path.with_suffix('.npz')) as arrays:
+        assert 'expert_actions' in arrays.files
+        assert 'states' in arrays.files
+    loaded = bank_module.RetrievalBank.load(path)
+    result = loaded.retrieve_tails(key, retrieval_k=2)
+    np.testing.assert_array_equal(result.expert_actions[0], np.ones(14))
+    np.testing.assert_array_equal(result.mask, [1.0, 0.0])
 
 
 def test_memory_bank_builder_uses_checkpoint_state_and_tail(load_script, monkeypatch):
@@ -147,7 +166,7 @@ def test_training_releases_adapter_before_training(load_script, monkeypatch, tmp
         return adapter
 
     monkeypatch.setattr(module, '_make_adapter', make_adapter)
-    monkeypatch.setattr(module.LiberoSampleCollector, 'collect_features', lambda self: [{}])
+    monkeypatch.setattr(module.LiberoSampleCollector, 'collect_features', lambda self, bank=None: [{}])
     trainer = module.ResidualLiberoTrainer(module.TrainConfig('model', output=tmp_path))
     bank = Mock()
     monkeypatch.setattr(trainer, '_load_memory_bank', Mock(return_value=bank))

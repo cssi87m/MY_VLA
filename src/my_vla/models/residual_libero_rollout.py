@@ -22,7 +22,6 @@ import numpy as np
 from my_vla.models.base_vlm import BaseVLM
 from my_vla.models.base_vlm import GrootN15Adapter
 from my_vla.models.future_state import ActionConditionedTransition
-from my_vla.models.future_state import FutureStateHead
 from my_vla.models.future_state import future_consistency
 from my_vla.models.projector import LatentProjector
 from my_vla.retrieval.bank import RetrievalBank
@@ -79,7 +78,7 @@ class ResidualLiberoRolloutPolicy:
     ) -> None:
         if config.state_dim != 7 or config.action_dim != 7:
             raise ValueError("LIBERO rollout requires 7-D state and action configurations")
-        required = {"projector", "future_head", "transition", "actor"}
+        required = {"projector", "transition", "actor"}
         missing = required.difference(params)
         if missing:
             raise ValueError(f"residual checkpoint is missing parameter groups: {sorted(missing)}")
@@ -94,7 +93,6 @@ class ResidualLiberoRolloutPolicy:
         self.params = params
         self.retrieval_bank = retrieval_bank
         self.projector = LatentProjector(output_dim=config.latent_dim)
-        self.future_head = FutureStateHead(state_dim=config.state_dim)
         self.transition = ActionConditionedTransition(
             state_dim=config.state_dim, action_dim=config.action_dim, action_horizon=config.action_horizon
         )

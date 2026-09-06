@@ -26,7 +26,7 @@ semantic language encoder.
 | --- | --- |
 | `RetrievalBank(records=...)` | Builds an in-memory bank; if keys are omitted, takes each record's key. |
 | `add(record)` | Appends one record, enforcing a consistent key width. |
-| `query(query_key, k=8)` | Returns up to `k` record indices and cosine scores in descending, stable order. |
+| `query(query_key, k=8)` | Returns up to `k` record indices and cosine scores in descending order using partial top-k selection. |
 | `aggregate(query_key, k=8)` | Softmax-weights retrieved contexts and returns one fixed-width `float32` vector. |
 | `retrieve_tails(query_key, retrieval_k, exclude_episode_id=...)` | Returns padded expert action-tail candidates, scores, returns, and a mask. |
 | `key_dim` / `context_dim` | Expose the key and aggregated-context widths. |
@@ -52,8 +52,12 @@ vector; a non-empty rollout bank must match the checkpoint's context width.
 
 ```text
 checkpoints/expert_memory_bank/expert_memory_bank.npz   # keys and derived context matrix
-checkpoints/expert_memory_bank/expert_memory_bank.json  # record metadata
+checkpoints/expert_memory_bank/expert_memory_bank.json  # textual record metadata
 ```
 
-`load()` reconstructs records and verifies that the derived contexts equal the
-stored context matrix. This avoids pickle and catches mismatched metadata.
+The NPZ contains keys, derived contexts, and all numeric record columns; JSON
+contains only instructions, episode IDs, and sources. New banks use an
+uncompressed NPZ to favor load latency. `load()` remains compatible with older
+banks whose numeric metadata is in JSON, reconstructs records, and verifies
+that the derived contexts equal the stored context matrix. This avoids pickle
+and catches mismatched metadata.
