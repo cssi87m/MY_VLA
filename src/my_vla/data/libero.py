@@ -38,10 +38,13 @@ class LiberoConfig:
     data_root: Path = DEFAULT_LIBERO_DATA_ROOT
     dataset_names: tuple[str, ...] = DEFAULT_DATASET_NAMES
     horizon: int = 8
+    replan_steps: int = 0
 
     def __post_init__(self) -> None:
         if self.horizon < 1:
             raise ValueError("horizon must be positive")
+        if not 0 <= self.replan_steps < self.horizon:
+            raise ValueError("replan_steps must be non-negative and smaller than horizon")
 
 
 def _axis_angle_to_matrix(axis_angle: jnp.ndarray) -> jnp.ndarray:
@@ -170,7 +173,14 @@ def _episode_arrays(episode: dict[str, Any]) -> dict[str, Any]:
     for index in range(len(rewards) - 1, -1, -1):
         running = float(rewards[index]) + float(discounts[index]) * running
         rtg[index] = running
-    return {"states": states, "actions": actions, "instructions": instructions, "returns": rtg}
+    return {
+        "states": states,
+        "actions": actions,
+        "instructions": instructions,
+        "rewards": rewards,
+        "discounts": discounts,
+        "returns": rtg,
+    }
 
 
 def iter_libero_transitions(
@@ -204,4 +214,7 @@ def iter_libero_transitions(
                 "state_chunk": arrays["states"][timestep : timestep + config.horizon + 1],
                 "future_state": arrays["states"][timestep + config.horizon],
                 "return_to_go": arrays["returns"][timestep],
+                "checkpoint_return_to_go": arrays["returns"][timestep + config.replan_steps],
+                "tail_reward": arrays["rewards"][timestep + config.replan_steps],
+                "tail_discount": arrays["discounts"][timestep + config.replan_steps],
             }

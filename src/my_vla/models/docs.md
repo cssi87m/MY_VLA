@@ -43,22 +43,24 @@ default `PretrainConfig.consistency_dim`.
 
 ## Online residual rollout
 
-`ResidualLiberoRolloutPolicy.from_checkpoint()` expects a checkpoint directory
-created by `scripts/train_residual_libero.py`:
+`ResidualLiberoRolloutPolicy.from_checkpoint()` expects a residual checkpoint
+and a separate expert memory-bank directory:
 
 ```text
 config.json
 params.msgpack
-retrieval_bank.npz
-retrieval_bank.json
+../expert_memory_bank/
+  manifest.json
+  expert_memory_bank.npz
+  expert_memory_bank.json
 ```
 
 The first `infer()` call for a plan runs GROOT and returns the first
 `replan_steps` base actions (`residual_phase="base_prefix"`). The next call
-uses the observed checkpoint state to compare against the transition model,
-then returns a corrected remaining tail (`residual_phase="corrected_tail"`)
-without invoking GROOT again. Set `reset_residual_plan` in a request to discard
-the cached prefix plan.
+uses the observed checkpoint state and instruction to retrieve expert tails,
+compares the state against the transition model, then returns a corrected
+remaining tail (`residual_phase="corrected_tail"`) without invoking GROOT
+again. Set `reset_residual_plan` in a request to discard the cached prefix plan.
 
 Serving requests use `observation.base_0_rgb`,
 `observation.left_wrist_0_rgb`, `observation.state`, and `prompt`. State may

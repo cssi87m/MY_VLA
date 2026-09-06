@@ -39,12 +39,12 @@ the replan checkpoint, rather than against another predicted state.
 | `state`, `future_state` | `(B, state_dim)`; default `(B, 7)`. |
 | `base_action_prefix` | `(B, replan_steps, action_dim)`. |
 | `base_action_tail`, `residual_target` | `(B, correction_horizon, action_dim)`. |
-| `retrieval_context` | `(B, context_dim)`. |
+| `retrieval_context` | `(B, retrieval_context_dim)`, containing padded retrieved expert tails, scores, returns, and a mask. |
 
-The training script collects frozen GROOT features first, writes the retrieval
-bank, releases GROOT GPU memory, then trains the JAX heads. A saved residual
-checkpoint contains `config.json`, `params.msgpack`, and the paired retrieval
-bank files consumed by the rollout policy.
+The training script loads an immutable expert memory bank, collects frozen
+GROOT features, releases GROOT GPU memory, then trains the JAX heads. The
+memory bank is passed separately to the rollout policy and must use the same
+horizon and replan-step values as the checkpoint.
 
 ## Offline-RL utilities
 

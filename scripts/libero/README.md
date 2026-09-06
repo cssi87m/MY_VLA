@@ -33,6 +33,7 @@ PYTHONPATH=$PWD/src XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_PYTHON_CLIENT_ALLOCA
   python -m scripts.serve_residual_libero \
   --groot-model-path "$GROOT_CHECKPOINT" \
   --checkpoint checkpoints/residual_libero \
+  --memory-bank checkpoints/expert_memory_bank \
   --port 11004
 
 

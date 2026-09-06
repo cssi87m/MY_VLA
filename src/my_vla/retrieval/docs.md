@@ -15,10 +15,10 @@ base_action)` constructs a record and defines the target as:
 residual_target = expert_action - base_action
 ```
 
-Training and rollout build keys by concatenating pooled base-VLM hidden
-features, canonical state, and `hash_text_embedding(instruction)`. The latter
-is deterministic and dependency-free, intended as a reproducible fallback—not
-a semantic language encoder.
+The expert memory bank builds keys from the canonical checkpoint state at
+`t + replan_steps` plus `hash_text_embedding(instruction)`. The latter is
+deterministic and dependency-free, intended as a reproducible fallback—not a
+semantic language encoder.
 
 ## `RetrievalBank`
 
@@ -28,6 +28,7 @@ a semantic language encoder.
 | `add(record)` | Appends one record, enforcing a consistent key width. |
 | `query(query_key, k=8)` | Returns up to `k` record indices and cosine scores in descending, stable order. |
 | `aggregate(query_key, k=8)` | Softmax-weights retrieved contexts and returns one fixed-width `float32` vector. |
+| `retrieve_tails(query_key, retrieval_k, exclude_episode_id=...)` | Returns padded expert action-tail candidates, scores, returns, and a mask. |
 | `key_dim` / `context_dim` | Expose the key and aggregated-context widths. |
 | `save(path)` / `load(path)` | Persist and restore the bank as paired `.npz` arrays and `.json` metadata. |
 
@@ -39,19 +40,19 @@ state + base_action + expert_action + residual_target + future_state + return_to
 
 For the default four-action correction tail, this is
 `7 + 28 + 28 + 28 + 7 + 1 = 99` values. The actual width depends on the
-action horizon/replan split and is saved in the training checkpoint's
-`PretrainConfig.context_dim`.
+action horizon/replan split. The residual actor instead receives individual
+candidate tails through `PretrainConfig.retrieval_context_dim`.
 
 An empty bank has context width zero and `aggregate()` returns a zero-length
 vector; a non-empty rollout bank must match the checkpoint's context width.
 
 ## Persistence
 
-`bank.save(Path("checkpoint/retrieval_bank"))` creates:
+`bank.save(Path("checkpoints/expert_memory_bank/expert_memory_bank"))` creates:
 
 ```text
-checkpoint/retrieval_bank.npz   # keys and derived context matrix
-checkpoint/retrieval_bank.json  # record metadata
+checkpoints/expert_memory_bank/expert_memory_bank.npz   # keys and derived context matrix
+checkpoints/expert_memory_bank/expert_memory_bank.json  # record metadata
 ```
 
 `load()` reconstructs records and verifies that the derived contexts equal the

@@ -26,7 +26,8 @@ from my_vla.models.future_state import FutureStateHead
 from my_vla.models.future_state import future_consistency
 from my_vla.models.projector import LatentProjector
 from my_vla.retrieval.bank import RetrievalBank
-from my_vla.retrieval.bank import hash_text_embedding
+from my_vla.retrieval.bank import checkpoint_retrieval_key
+from my_vla.retrieval.bank import tail_candidate_features
 from my_vla.rl.residual_ac import ResidualActor
 from my_vla.rl.residual_ac import build_actor_input
 from my_vla.rl.residual_ac import clip_libero_action
@@ -82,10 +83,12 @@ class ResidualLiberoRolloutPolicy:
         missing = required.difference(params)
         if missing:
             raise ValueError(f"residual checkpoint is missing parameter groups: {sorted(missing)}")
-        if retrieval_bank.context_dim != config.context_dim:
+        if retrieval_bank.key_dim != config.state_dim + 64:
             raise ValueError(
-                f"retrieval context dim {retrieval_bank.context_dim} != checkpoint context dim {config.context_dim}"
+                f"retrieval key dim {retrieval_bank.key_dim} is not compatible with a {config.state_dim}-D checkpoint state"
             )
+        if retrieval_bank.expert_action_dim != config.correction_horizon * config.action_dim:
+            raise ValueError("retrieval expert-tail shape does not match the residual checkpoint")
         self.base_vlm = base_vlm
         self.config = config
         self.params = params
@@ -103,6 +106,7 @@ class ResidualLiberoRolloutPolicy:
         cls,
         checkpoint: str | Path,
         *,
+        memory_bank: str | Path,
         groot_model_path: str,
         groot_data_config: str = "my_vla.models.groot_libero_config:LiberoDataConfig",
         groot_embodiment_tag: str = "new_embodiment",
@@ -118,7 +122,12 @@ class ResidualLiberoRolloutPolicy:
         config_data = json.loads((checkpoint / "config.json").read_text(encoding="utf-8"))
         config = PretrainConfig(**{key: value for key, value in config_data.items() if key in PretrainConfig.__dataclass_fields__})
         params = flax.serialization.msgpack_restore((checkpoint / "params.msgpack").read_bytes())
+        # Load offline memory bank
+        memory_bank = Path(memory_bank)
+        bank_path = memory_bank / "expert_memory_bank" if memory_bank.is_dir() else memory_bank
+        retrieval_bank = RetrievalBank.load(bank_path)
         data_config = load_data_config(groot_data_config)
+        # Init base VLM with GR00T model and data config
         base_vlm = GrootN15Adapter(
             model_path=groot_model_path,
             embodiment_tag=groot_embodiment_tag,
@@ -130,7 +139,7 @@ class ResidualLiberoRolloutPolicy:
             base_vlm.policy.model.eval()
             base_vlm.policy.model.requires_grad_(False)
 
-        return cls(base_vlm=base_vlm, config=config, params=params, retrieval_bank=RetrievalBank.load(checkpoint / "retrieval_bank"))
+        return cls(base_vlm=base_vlm, config=config, params=params, retrieval_bank=retrieval_bank)
 
     def infer(self, request: Mapping[str, Any]) -> dict[str, np.ndarray]:
         """Return a base prefix, then a GR00T-free corrected tail on the next call."""
@@ -153,19 +162,14 @@ class ResidualLiberoRolloutPolicy:
             base_chunk = self._base_chunk(output.base_action)
             hidden = jnp.asarray(output.hidden)[None]
             latent = self.projector.apply({"params": self.params["projector"]}, hidden)
-            pooled_hidden = self._pool_hidden(output.hidden)
-            key = np.concatenate([pooled_hidden, state, hash_text_embedding(instruction)]).astype(np.float32)
-            context = jnp.asarray(self.retrieval_bank.aggregate(key)[None])
             prefix = base_chunk[:, : self.config.replan_steps]
             tail = base_chunk[:, self.config.replan_steps :]
             expected_checkpoint = self.transition.apply({"params": self.params["transition"]}, jnp.asarray(state)[None], prefix)
             self._cached_plan = _CachedPlan(
-                state=jnp.asarray(state)[None],
-                prefix=prefix,
                 tail=tail,
                 expected_checkpoint=expected_checkpoint,
                 latent=latent,
-                context=context,
+                instruction=instruction,
             )
             return {
                 "actions": np.asarray(clip_libero_action(prefix[0]), dtype=np.float32),
@@ -176,8 +180,12 @@ class ResidualLiberoRolloutPolicy:
         cached = self._cached_plan
         self._cached_plan = None
         actual_checkpoint = jnp.asarray(state)[None]
+        retrieved = self.retrieval_bank.retrieve_tails(
+            checkpoint_retrieval_key(state, cached.instruction), retrieval_k=self.config.retrieval_k
+        )
+        context = jnp.asarray(tail_candidate_features(retrieved)[None])
         consistency = future_consistency(actual_checkpoint, cached.expected_checkpoint)
-        actor_input = build_actor_input(cached.latent, cached.tail.reshape(1, -1), consistency, cached.context)
+        actor_input = build_actor_input(cached.latent, cached.tail.reshape(1, -1), consistency, context)
         residual = self.actor.apply({"params": self.params["actor"]}, actor_input)[0]
         corrected_tail = clip_libero_action(cached.tail[0] + residual.reshape(self.config.correction_horizon, self.config.action_dim))
         return {
@@ -197,21 +205,11 @@ class ResidualLiberoRolloutPolicy:
             chunk = np.concatenate([chunk, np.repeat(chunk[-1:], self.config.action_horizon - len(chunk), axis=0)])
         return jnp.asarray(chunk[None])
 
-    @staticmethod
-    def _pool_hidden(hidden: Any) -> np.ndarray:
-        value = np.asarray(hidden, dtype=np.float32)
-        if value.ndim < 1:
-            raise ValueError(f"GR00T hidden features must have at least one dimension, got {value.shape}")
-        return value.mean(axis=tuple(range(value.ndim - 1))) if value.ndim > 1 else value
-
-
 @dataclasses.dataclass(frozen=True)
 class _CachedPlan:
     """Information retained between prefix execution and tail correction."""
 
-    state: jnp.ndarray
-    prefix: jnp.ndarray
     tail: jnp.ndarray
     expected_checkpoint: jnp.ndarray
     latent: jnp.ndarray
-    context: jnp.ndarray
+    instruction: str

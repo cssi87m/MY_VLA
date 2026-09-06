@@ -24,7 +24,7 @@ class PretrainConfig:
     replan_steps: int = 4
     latent_dim: int = 256
     vlm_hidden_dim: int = 1024
-    context_dim: int = 36
+    retrieval_k: int = 8
     consistency_dim: int = 18
     learning_rate: float = 3e-4
     future_loss_weight: float = 1.0
@@ -33,6 +33,11 @@ class PretrainConfig:
     @property
     def correction_horizon(self) -> int:
         return self.action_horizon - self.replan_steps
+
+    @property
+    def retrieval_context_dim(self) -> int:
+        tail_dim = self.correction_horizon * self.action_dim
+        return self.retrieval_k * (tail_dim + 3)
 
 
 @dataclasses.dataclass
@@ -72,7 +77,7 @@ def initialize_pretraining(
     state = jnp.zeros((2, config.state_dim), dtype=jnp.float32)
     prefix_actions = jnp.zeros((2, config.replan_steps, config.action_dim), dtype=jnp.float32)
     tail_actions = jnp.zeros((2, config.correction_horizon, config.action_dim), dtype=jnp.float32)
-    context = jnp.zeros((2, config.context_dim), dtype=jnp.float32)
+    context = jnp.zeros((2, config.retrieval_context_dim), dtype=jnp.float32)
     consistency = jnp.zeros((2, config.consistency_dim), dtype=jnp.float32)
     params = {
         "projector": bundle.projector.init(keys[0], hidden)["params"],

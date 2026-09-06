@@ -33,7 +33,7 @@ def load_script(monkeypatch):
     stub('tyro', cli=Mock())
     stub('scipy.spatial.transform', Rotation=Mock())
     stub('src.my_vla.data.libero', DEFAULT_LIBERO_DATA_ROOT=Path('/data'),
-         LiberoConfig=lambda root, horizon: (root, horizon), iter_libero_transitions=Mock())
+         LiberoConfig=lambda root, horizon, replan_steps=0: (root, horizon, replan_steps), iter_libero_transitions=Mock())
     stub('src.my_vla.models.base_vlm', GrootN15Adapter=Mock())
     stub('src.my_vla.models.future_state', ActionConditionedTransition=Mock(), future_consistency=Mock())
     stub('src.my_vla.models.projector', LatentProjector=Mock())
@@ -69,17 +69,61 @@ def test_training_features_and_batch_preserve_checkpoint_tail(load_script, monke
     }
     monkeypatch.setattr(module, 'iter_libero_transitions', lambda config: iter([sample, sample]))
     adapter = Mock(return_value=SimpleNamespace(base_action=np.zeros((2, 7)), hidden=np.ones((2, 3))))
-    config = module.TrainConfig('model', horizon=4, replan_steps=2, max_samples=1)
-    records, samples = module.LiberoSampleCollector(config, adapter).collect()
+    config = module.TrainConfig('model', horizon=4, replan_steps=2, retrieval_k=2, max_samples=1)
+    samples = module.LiberoSampleCollector(config, adapter).collect_features()
     assert len(samples) == 1
-    np.testing.assert_array_equal(records[0].state, sample['state_chunk'][2])
-    np.testing.assert_array_equal(records[0].residual_target, np.ones(14))
-    bank = module.RetrievalBank(records=records)
-    batch = module.ResidualLiberoTrainer(config)._make_batch(samples, records, bank)
+    np.testing.assert_array_equal(samples[0]['checkpoint_state'], sample['state_chunk'][2])
+    bank_module = sys.modules['src.my_vla.retrieval.bank']
+    record = bank_module.RetrievalRecord(
+        key=bank_module.checkpoint_retrieval_key(sample['state_chunk'][2], 'move'),
+        state=sample['state_chunk'][2], instruction='move',
+        base_action=np.zeros(14), expert_action=np.full(14, 2.0), residual_target=np.full(14, 2.0),
+        future_state=np.zeros(7), return_to_go=1.0, episode_id='other:0', timestep=2,
+    )
+    bank = module.RetrievalBank(records=[record])
+    batch = module.ResidualLiberoTrainer(config)._make_batch(samples, bank)
     assert batch['base_action_prefix'].shape == (1, 2, 7)
     assert batch['base_action_tail'].shape == (1, 2, 7)
     np.testing.assert_array_equal(batch['future_state'][0], sample['state_chunk'][2])
     np.testing.assert_array_equal(batch['residual_target'], np.ones((1, 2, 7)))
+    np.testing.assert_array_equal(batch['retrieval_context'][0, :14], np.full(14, 2.0))
+
+
+def test_checkpoint_retrieval_excludes_episode_and_pads(load_script):
+    load_script('scripts/train_residual_libero.py')
+    bank_module = sys.modules['src.my_vla.retrieval.bank']
+    key = bank_module.checkpoint_retrieval_key(np.zeros(7), 'move')
+    records = [
+        bank_module.RetrievalRecord(key, np.zeros(7), 'move', np.zeros(14), np.ones(14), np.ones(14), np.zeros(7), 1.0, 'same:0'),
+        bank_module.RetrievalRecord(key, np.zeros(7), 'move', np.zeros(14), np.full(14, 2.0), np.full(14, 2.0), np.zeros(7), 3.0, 'other:0'),
+    ]
+    result = bank_module.RetrievalBank(records=records).retrieve_tails(
+        key, retrieval_k=3, exclude_episode_id='same:0'
+    )
+    np.testing.assert_array_equal(result.mask, [1.0, 0.0, 0.0])
+    np.testing.assert_array_equal(result.expert_actions[0], np.full(14, 2.0))
+    np.testing.assert_array_equal(result.expert_actions[1:], np.zeros((2, 14)))
+
+
+def test_memory_bank_builder_uses_checkpoint_state_and_tail(load_script, monkeypatch):
+    module = load_script('scripts/build_memory_bank.py')
+    sample = {
+        'observation': {}, 'instruction': 'move', 'episode_id': 'demo:0', 'timestep': 3,
+        'state_chunk': np.arange(35, dtype=np.float32).reshape(5, 7),
+        'expert_action_chunk': np.ones((4, 7), dtype=np.float32), 'future_state': np.full(7, 9.0),
+        'checkpoint_return_to_go': 2.0, 'tail_reward': 1.0, 'tail_discount': 0.99,
+    }
+    monkeypatch.setattr(module, 'iter_libero_transitions', lambda config: iter([sample]))
+    adapter = Mock(return_value=SimpleNamespace(base_action=np.zeros((4, 7))))
+    records = module.ExpertMemoryBankBuilder(
+        module.MemoryBankBuildConfig('model', horizon=4, replan_steps=2)
+    ).build_records(adapter)
+    assert len(records) == 1
+    np.testing.assert_array_equal(records[0].state, sample['state_chunk'][2])
+    np.testing.assert_array_equal(records[0].expert_action, np.ones(14))
+    assert records[0].return_to_go == 2.0
+    assert records[0].tail_reward == 1.0
+    assert records[0].source == 'expert'
 
 
 def test_training_empty_dataset_and_invalid_batch(load_script, monkeypatch):
@@ -103,10 +147,10 @@ def test_training_releases_adapter_before_training(load_script, monkeypatch, tmp
         return adapter
 
     monkeypatch.setattr(module, '_make_adapter', make_adapter)
-    monkeypatch.setattr(module.LiberoSampleCollector, 'collect', lambda self: ([], [{}]))
+    monkeypatch.setattr(module.LiberoSampleCollector, 'collect_features', lambda self: [{}])
     trainer = module.ResidualLiberoTrainer(module.TrainConfig('model', output=tmp_path))
     bank = Mock()
-    monkeypatch.setattr(module, 'RetrievalBank', Mock(return_value=bank))
+    monkeypatch.setattr(trainer, '_load_memory_bank', Mock(return_value=bank))
 
     def train(*args):
         assert references[0]() is None
@@ -115,7 +159,6 @@ def test_training_releases_adapter_before_training(load_script, monkeypatch, tmp
     monkeypatch.setattr(trainer, 'train', train)
     monkeypatch.setattr(trainer, 'save_checkpoint', Mock())
     trainer.run()
-    bank.save.assert_called_once_with(tmp_path / 'retrieval_bank')
     trainer.save_checkpoint.assert_called_once_with('config', 'params')
 
 
@@ -131,9 +174,10 @@ def test_server_forwards_checkpoint_metadata(load_script):
     module = load_script('scripts/serve_residual_libero.py')
     policy = module.ResidualLiberoRolloutPolicy.from_checkpoint.return_value
     policy.config = SimpleNamespace(action_dim=7, action_horizon=8, replan_steps=4)
-    module.main(module.Args('model', Path('checkpoint'), host='localhost', port=1234))
+    module.main(module.Args('model', Path('checkpoint'), Path('memory_bank'), host='localhost', port=1234))
     factory = module.websocket_policy_server.WebsocketPolicyServer
     assert factory.call_args.kwargs['metadata']['recommended_replan_steps'] == 4
+    assert factory.call_args.kwargs['metadata']['memory_bank'] == 'memory_bank'
     assert factory.call_args.kwargs['host'] == 'localhost'
     factory.return_value.serve_forever.assert_called_once()
 

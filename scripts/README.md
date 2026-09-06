@@ -7,6 +7,7 @@ using the environment containing GR00T, JAX/Flax, and OpenPI.
 
 | Script | Classes | Responsibilities |
 | --- | --- | --- |
+| `build_memory_bank.py` | `MemoryBankBuildConfig`, `ExpertMemoryBankBuilder` | Build immutable expert checkpoint records for retrieval and offline RL |
 | `train_residual_libero.py` | `TrainConfig`, `LiberoSampleCollector`, `ResidualLiberoTrainer` | Collect features, construct batches, train heads, save checkpoints |
 | `serve_residual_libero.py` | `Args`, `ResidualLiberoServer` | Load the rollout policy and serve websocket requests |
 | `libero/main.py` | `Args`, `LiberoEvaluator` | Manage benchmark tasks, episodes, action phases, videos, and JSON results |
