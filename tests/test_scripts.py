@@ -125,26 +125,6 @@ def test_argparse_defaults_and_overrides(load_script):
     assert args.batch_size == 3
     assert args.replan_steps == 4
     assert args.horizon == 8
-    evaluate = load_script('scripts/eval_residual_libero.py')
-    args = evaluate._parse_args(['--groot-model-path', 'model', '--checkpoint', 'checkpoint'])
-    assert args.checkpoint == Path('checkpoint')
-    assert args.replan_steps is None
-
-
-def test_offline_evaluation_aggregates_and_limits_samples(load_script, monkeypatch):
-    module = load_script('scripts/eval_residual_libero.py')
-    evaluator = module.ResidualLiberoEvaluator(module.EvalConfig('model', Path('checkpoint'), max_samples=2))
-    evaluator.config = SimpleNamespace(action_horizon=8, replan_steps=4, correction_horizon=4)
-    monkeypatch.setattr(evaluator, 'load_checkpoint', Mock())
-    monkeypatch.setattr(evaluator, 'evaluate_sample', Mock(side_effect=[(2., 1.), (4., 0.)]))
-    monkeypatch.setattr(module, 'iter_libero_transitions', lambda config: iter([{}, {}, {}]))
-    assert evaluator.run() == {
-        'samples': 2, 'replan_steps': 4, 'correction_horizon': 4,
-        'base_tail_mse': 3., 'residual_tail_mse': .5,
-    }
-    monkeypatch.setattr(module, 'iter_libero_transitions', lambda config: iter([]))
-    with pytest.raises(RuntimeError, match='No valid LIBERO'):
-        evaluator.run()
 
 
 def test_server_forwards_checkpoint_metadata(load_script):

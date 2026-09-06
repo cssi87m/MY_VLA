@@ -8,7 +8,6 @@ using the environment containing GR00T, JAX/Flax, and OpenPI.
 | Script | Classes | Responsibilities |
 | --- | --- | --- |
 | `train_residual_libero.py` | `TrainConfig`, `LiberoSampleCollector`, `ResidualLiberoTrainer` | Collect features, construct batches, train heads, save checkpoints |
-| `eval_residual_libero.py` | `EvalConfig`, `ResidualLiberoEvaluator` | Load checkpoint assets, evaluate samples, return aggregate metrics |
 | `serve_residual_libero.py` | `Args`, `ResidualLiberoServer` | Load the rollout policy and serve websocket requests |
 | `libero/main.py` | `Args`, `LiberoEvaluator` | Manage benchmark tasks, episodes, action phases, videos, and JSON results |
 
@@ -32,9 +31,9 @@ trainer = ResidualLiberoTrainer(TrainConfig(
 trainer.run()
 ```
 
-`ResidualLiberoEvaluator.run()` and `LiberoEvaluator.run()` return result dictionaries.
-The offline CLI prints its results; the simulator also writes results and videos.
-See [LIBERO setup and evaluation](libero/README.md) for simulator commands.
+`LiberoEvaluator.run()` returns the simulator benchmark result dictionary and writes
+the corresponding results and videos. See [LIBERO setup and evaluation](libero/README.md)
+for simulator commands.
 
 Run the orchestration regression tests with NumPy and pytest installed:
 

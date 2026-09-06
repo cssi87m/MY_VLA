@@ -165,7 +165,8 @@ src/my_vla/
   training/pretrain.py    # state/dynamics and residual BC initialization
   training/offline_rl.py  # conservative offline RL updates
 scripts/train_residual_libero.py
-scripts/eval_residual_libero.py
+scripts/serve_residual_libero.py
+scripts/libero/main.py
 ```
 
 Use JAX/Flax/Optax to stay compatible with LAP. Reuse LAP's LIBERO transforms as the source of truth for gripper and rotation conventions: `lap/src/lap/datasets/utils/transforms.py`.
