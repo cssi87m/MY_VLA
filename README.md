@@ -85,12 +85,7 @@ deterministic instruction embedding. Its payload contains the expert action
 tail and retrieval metadata.
 
 ```bash
-PYTHONPATH=$PWD/src python -m scripts.build_memory_bank \
-  --groot-model-path "$GROOT_CHECKPOINT" \
-  --data-root /path/to/openvla-modified_libero_rlds \
-  --output checkpoints/expert_memory_bank \
-  --horizon 8 \
-  --replan-steps 4
+PYTHONPATH=$PWD CUDA_VISIBLE_DEVICES=0 python -m scripts.build_memory_bank     --groot-model-path "$PWD/checkpoints/groot-n15-libero"     --groot-embodiment-tag new_embodiment     --data-root "$PWD/data/openvla-modified_libero_rlds"     --output "$PWD/checkpoints/expert_memory_bank"
 ```
 
 This creates:
@@ -109,10 +104,10 @@ retrieval context once per sample, releases GR00T GPU memory, and then runs a
 JIT-compiled JAX update for the residual heads.
 
 ```bash
-PYTHONPATH=$PWD/src XLA_PYTHON_CLIENT_PREALLOCATE=false \
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=$PWD/src XLA_PYTHON_CLIENT_PREALLOCATE=false \
   python -m scripts.train_residual_libero \
-  --groot-model-path "$GROOT_CHECKPOINT" \
-  --data-root /path/to/openvla-modified_libero_rlds \
+  --groot-model-path "$PWD/checkpoints/groot-n15-libero" \
+  --data-root "$PWD/data/openvla-modified_libero_rlds" \
   --memory-bank checkpoints/expert_memory_bank \
   --output checkpoints/residual_libero \
   --horizon 8 \

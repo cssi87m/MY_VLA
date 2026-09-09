@@ -291,18 +291,46 @@ class RetrievalBank:
     @classmethod
     def load(cls, path: Path) -> RetrievalBank:
         path = Path(path)
-        arrays = np.load(path.with_suffix(".npz"))
         metadata = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
-        numeric_columns = "states" in arrays.files
+        # NpzFile does not cache archive members: every ``archive[name]``
+        # call deserializes a complete column. Materialize the columns once
+        # before taking row views, otherwise every record retains a distinct
+        # full backing array and a large bank exhausts host RAM.
+        with np.load(path.with_suffix(".npz")) as archive:
+            keys = np.asarray(archive["keys"], dtype=np.float32)
+            stored_contexts = np.asarray(archive["contexts"], dtype=np.float32)
+            numeric_columns = "states" in archive.files
+            numeric = (
+                {
+                    name: np.asarray(archive[name])
+                    for name in (
+                        "states",
+                        "base_actions",
+                        "expert_actions",
+                        "residual_targets",
+                        "future_states",
+                        "returns_to_go",
+                        "timesteps",
+                        "tail_rewards",
+                        "tail_discounts",
+                    )
+                }
+                if numeric_columns
+                else {}
+            )
+
+        count = len(metadata["instructions"])
+        episode_ids = metadata.get("episode_ids", [""] * count)
+        sources = metadata.get("sources", ["expert"] * count)
         records = []
         for index, instruction in enumerate(metadata["instructions"]):
             # Support existing banks whose numeric values were stored in JSON.
             def column(name: str, legacy_name: str):
-                return arrays[name][index] if numeric_columns else metadata[legacy_name][index]
+                return numeric[name][index] if numeric_columns else metadata[legacy_name][index]
 
             records.append(
                 RetrievalRecord(
-                    key=arrays["keys"][index],
+                    key=keys[index],
                     state=np.asarray(column("states", "states"), dtype=np.float32),
                     instruction=instruction,
                     base_action=np.asarray(column("base_actions", "base_actions"), dtype=np.float32),
@@ -310,14 +338,14 @@ class RetrievalBank:
                     residual_target=np.asarray(column("residual_targets", "residual_targets"), dtype=np.float32),
                     future_state=np.asarray(column("future_states", "future_states"), dtype=np.float32),
                     return_to_go=float(column("returns_to_go", "returns_to_go")),
-                    episode_id=str(metadata.get("episode_ids", [""] * len(metadata["instructions"]))[index]),
+                    episode_id=str(episode_ids[index]),
                     timestep=int(column("timesteps", "timesteps")) if numeric_columns else int(metadata.get("timesteps", [-1] * len(metadata["instructions"]))[index]),
-                    source=str(metadata.get("sources", ["expert"] * len(metadata["instructions"]))[index]),
+                    source=str(sources[index]),
                     tail_reward=float(column("tail_rewards", "tail_rewards")) if numeric_columns else float(metadata.get("tail_rewards", [0.0] * len(metadata["instructions"]))[index]),
                     tail_discount=float(column("tail_discounts", "tail_discounts")) if numeric_columns else float(metadata.get("tail_discounts", [1.0] * len(metadata["instructions"]))[index]),
                 )
             )
-        bank = cls(keys=np.asarray(arrays["keys"], dtype=np.float32), records=records)
-        if not np.allclose(bank._contexts, arrays["contexts"]):
+        bank = cls(keys=keys, records=records)
+        if not np.allclose(bank._contexts, stored_contexts):
             raise ValueError("retrieval metadata and stored contexts disagree")
         return bank
