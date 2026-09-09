@@ -33,7 +33,9 @@ def load_script(monkeypatch):
     stub('tyro', cli=Mock())
     stub('scipy.spatial.transform', Rotation=Mock())
     stub('src.my_vla.data.libero', DEFAULT_LIBERO_DATA_ROOT=Path('/data'),
-         LiberoConfig=lambda root, horizon, replan_steps=0: (root, horizon, replan_steps), iter_libero_transitions=Mock())
+         LiberoConfig=lambda root, horizon, replan_steps=0: (root, horizon, replan_steps), iter_libero_transitions=Mock(),
+         libero_state=lambda value: value[..., :7], libero_action=lambda value: value,
+         load_libero_episodes=Mock())
     stub('src.my_vla.models.base_vlm', GrootN15Adapter=Mock())
     stub('src.my_vla.models.future_state', ActionConditionedTransition=Mock(), future_consistency=Mock())
     stub('src.my_vla.models.projector', LatentProjector=Mock())
@@ -187,6 +189,42 @@ def test_argparse_defaults_and_overrides(load_script):
     assert args.batch_size == 3
     assert args.replan_steps == 4
     assert args.horizon == 8
+
+
+def test_metadata_builder_preserves_two_finger_gripper_and_merges_base_metadata(load_script, tmp_path):
+    module = load_script('scripts/create_groot_libero_metadata.py')
+    episode = {
+        'steps': [
+            {
+                'observation': {
+                    'state': np.array([1, 2, 3, 4, 5, 6, 0.5, 0.5], dtype=np.float32),
+                    'image': np.zeros((4, 6, 3), dtype=np.uint8),
+                    'wrist_image': np.zeros((4, 6, 3), dtype=np.uint8),
+                },
+                'action': np.arange(7, dtype=np.float32),
+            },
+            {
+                'observation': {
+                    'state': np.array([3, 4, 5, 6, 7, 8, 1, 1], dtype=np.float32),
+                    'image': np.zeros((4, 6, 3), dtype=np.uint8),
+                    'wrist_image': np.zeros((4, 6, 3), dtype=np.uint8),
+                },
+                'action': np.arange(7, dtype=np.float32) + 2,
+            },
+        ]
+    }
+    entry = module.build_new_embodiment_metadata([episode], fps=10)
+    assert entry['modalities']['video']['image'] == {'resolution': [6, 4], 'channels': 3, 'fps': 10}
+    assert entry['modalities']['state']['gripper']['shape'] == [2]
+    np.testing.assert_allclose(entry['statistics']['state']['gripper']['min'], [0.02, -0.04])
+    np.testing.assert_allclose(entry['statistics']['state']['gripper']['max'], [0.04, -0.02])
+    base = tmp_path / 'base.json'
+    output = tmp_path / 'metadata.json'
+    base.write_text(json.dumps({'gr1': {'existing': True}}))
+    module.write_metadata(entry, output, base_metadata=base)
+    saved = json.loads(output.read_text())
+    assert saved['gr1'] == {'existing': True}
+    assert saved['new_embodiment'] == entry
 
 
 def test_server_forwards_checkpoint_metadata(load_script):

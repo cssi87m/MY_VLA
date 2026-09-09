@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+from tqdm.auto import tqdm
 
 from src.my_vla.data.libero import DEFAULT_LIBERO_DATA_ROOT
 from src.my_vla.data.libero import LiberoConfig
@@ -86,7 +87,7 @@ class ExpertMemoryBankBuilder:
         records: list[RetrievalRecord] = []
         config = self.config
         dataset = LiberoConfig(config.data_root, horizon=config.horizon, replan_steps=config.replan_steps)
-        for sample in iter_libero_transitions(dataset):
+        for sample in tqdm(iter_libero_transitions(dataset), desc="Building expert memory bank"):
             base = adapter(sample["observation"], sample["instruction"])
             base_chunk = _pad_action_chunk(base.base_action, config.horizon)
             checkpoint_state = np.asarray(sample["state_chunk"][config.replan_steps], dtype=np.float32)
